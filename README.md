@@ -143,18 +143,26 @@ $ ./promload --log.level=debug copy exporter:http://127.0.0.1:9099/metrics promh
 $ git-chglog 0.0.1.. -o CHANGELOG.md
 
 > Testing release
+
+```
 $ goreleaser --snapshot --skip-publish --rm-dist
+```
 
 > To release
+
+```
 $ git-chglog v0.0.1.. -o CHANGELOG.md
 $ export GITHUB_TOKEN=`YOUR_GH_TOKEN`
 $ git tag -a v0.1.0 -m "First release"
 $ git push origin v0.1.0
 $ goreleaser
+```
 
 ## How to start
 
-go build ./cmd/promhouse/
+```
+$ go build ./cmd/promhouse/
 
-make up (linux)
-make up-mac (linux)
+$ make up (linux)
+$ make up-mac (linux)
+```
