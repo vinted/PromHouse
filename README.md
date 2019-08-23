@@ -117,3 +117,44 @@ ANY INNER JOIN
     LIMIT 10
 ) USING (fingerprint)
 ```
+
+## Benchmark / stress test
+
+$ go build ./cmd/fake_exporter
+$ ./fake_exporter
+INFO[0000] Serving fake metrics on http://127.0.0.1:9099/metrics
+INFO[0000] Serving self metrics on http://127.0.0.1:9099/metrics/self
+
+> This will copy data from `fake_exporter` and write to promhouse
+
+$ go build ./cmd/promload
+$ ./promload --log.level=debug copy exporter:http://127.0.0.1:9099/metrics promhouse:http://127.0.0.1:7781/write
+
+
+## How to install dependencies
+
+> Install `goreleaser` https://github.com/goreleaser/goreleaser/releases
+> Install `git-chglog` go get -u github.com/git-chglog/git-chglog/cmd/git-chglog
+
+
+## How to release
+
+> To generate CHANGELOG.md
+$ git-chglog 0.0.1.. -o CHANGELOG.md
+
+> Testing release
+$ goreleaser --snapshot --skip-publish --rm-dist
+
+> To release
+$ git-chglog v0.0.1.. -o CHANGELOG.md
+$ export GITHUB_TOKEN=`YOUR_GH_TOKEN`
+$ git tag -a v0.1.0 -m "First release"
+$ git push origin v0.1.0
+$ goreleaser
+
+## How to start
+
+go build ./cmd/promhouse/
+
+make up (linux)
+make up-mac (linux)
