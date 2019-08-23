@@ -5,6 +5,8 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/Percona-Lab/PromHouse)](https://goreportcard.com/report/github.com/Percona-Lab/PromHouse)
 [![CLA assistant](https://cla-assistant.percona.com/readme/badge/Percona-Lab/PromHouse)](https://cla-assistant.percona.com/Percona-Lab/PromHouse)
 
+> FORK of: https://github.com/Percona-Lab/PromHouse will always follow upstream changes
+
 PromHouse is a long-term remote storage with built-in clustering and downsampling for 2.x on top of
 [ClickHouse](https://clickhouse.yandex). Or, rather, it will be someday.
 Feel free to ~~like, share, retweet,~~ star and watch it, but **do not use it in production** yet.
@@ -133,14 +135,26 @@ $ ./promload --log.level=debug copy exporter:http://127.0.0.1:9099/metrics promh
 
 ## How to install dependencies
 
-> Install `goreleaser` https://github.com/goreleaser/goreleaser/releases
-> Install `git-chglog` go get -u github.com/git-chglog/git-chglog/cmd/git-chglog
+```
+`goreleaser`
+
+https://github.com/goreleaser/goreleaser/releases select preferred way
+```
+
+```
+`git-chglog`
+
+go get -u github.com/git-chglog/git-chglog/cmd/git-chglog
+```
 
 
 ## How to release
 
 > To generate CHANGELOG.md
+
+```
 $ git-chglog 0.0.1.. -o CHANGELOG.md
+```
 
 > Testing release
 
