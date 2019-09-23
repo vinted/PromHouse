@@ -150,8 +150,9 @@ func readRequest(req *http.Request, pb proto.Message) error {
 }
 
 // convertReadRequest converts protobuf read request into a slice of storage queries.
-func (p *PromAPI) convertReadRequest(request *prompb.ReadRequest) []base.Query {
+func (p *PromAPI) convertReadRequest(request *prompb.ReadRequest) ([]base.Query, *prompb.ReadHints) {
 	queries := make([]base.Query, len(request.Queries))
+  var hints *prompb.ReadHints
 	for i, rq := range request.Queries {
 		q := base.Query{
 			Start:    model.Time(rq.StartTimestampMs),
@@ -181,14 +182,10 @@ func (p *PromAPI) convertReadRequest(request *prompb.ReadRequest) []base.Query {
 			}
 		}
 
-		if rq.Hints != nil {
-			p.l.Warnf("Ignoring hint %+v for query %v.", *rq.Hints, q)
-		}
-
 		queries[i] = q
+    hints = rq.Hints
 	}
-
-	return queries
+	return queries, hints
 }
 
 // errResponseType converts given error to short string used as metric label value.
@@ -243,23 +240,24 @@ func (p *PromAPI) read(rw http.ResponseWriter, req *http.Request) (info string, 
 		}
 	}()
 
+  p.l.Debugf("Req data:\n%s", req)
+
 	var request prompb.ReadRequest
 	if err = readRequest(req, &request); err != nil {
 		return
 	}
 
 	// read from storage
-	queries := p.convertReadRequest(&request)
+	queries, hints := p.convertReadRequest(&request)
 	info = "queries: "
 	for i, q := range queries {
 		info += fmt.Sprintf("%d: %s, ", i+1, q)
 	}
 	info = strings.TrimSuffix(info, ", ")
 	var response *prompb.ReadResponse
-	if response, err = p.storage.Read(req.Context(), queries); err != nil {
+	if response, err = p.storage.Read(req.Context(), queries, hints); err != nil {
 		return
 	}
-	p.l.Debugf("Response data:\n%s", response)
 
 	// marshal, encode and write response
 	// TODO use MarshalTo with sync.Pool?

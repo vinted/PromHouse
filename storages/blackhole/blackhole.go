@@ -54,7 +54,7 @@ func (b *blackhole) Collect(c chan<- prometheus.Metric) {
 	b.mDummy.Collect(c)
 }
 
-func (b *blackhole) Read(ctx context.Context, queries []base.Query) (*prompb.ReadResponse, error) {
+func (b *blackhole) Read(ctx context.Context, queries []base.Query, hints *prompb.ReadHints) (*prompb.ReadResponse, error) {
 	res := &prompb.ReadResponse{
 		Results: make([]*prompb.QueryResult, len(queries)),
 	}

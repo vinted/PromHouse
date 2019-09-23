@@ -62,7 +62,7 @@ func (m *memory) Collect(c chan<- prometheus.Metric) {
 	m.mDummy.Collect(c)
 }
 
-func (m *memory) Read(ctx context.Context, queries []base.Query) (*prompb.ReadResponse, error) {
+func (m *memory) Read(ctx context.Context, queries []base.Query, hints *prompb.ReadHints) (*prompb.ReadResponse, error) {
 	m.rw.RLock()
 	defer m.rw.RUnlock()
 
