@@ -146,61 +146,9 @@ func New(params *Params) (base.Storage, error) {
 	go func() {
 		ctx := pprof.WithLabels(context.TODO(), pprof.Labels("component", "clickhouse_reloader"))
 		pprof.SetGoroutineLabels(ctx)
-		ch.runTimeSeriesReloader(ctx)
 	}()
 
 	return ch, nil
-}
-
-func (ch *clickHouse) runTimeSeriesReloader(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	q := fmt.Sprintf(`SELECT DISTINCT fingerprint, labels FROM %s.time_series`, ch.database)
-	for {
-		ch.timeSeriesRW.RLock()
-		timeSeries := make(map[uint64][]*prompb.Label, len(ch.timeSeries))
-		ch.timeSeriesRW.RUnlock()
-
-		err := func() error {
-			ch.l.Debug(q)
-			rows, err := ch.db.Query(q)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
-
-			var f uint64
-			var b []byte
-			for rows.Next() {
-				if err = rows.Scan(&f, &b); err != nil {
-					return err
-				}
-				if timeSeries[f], err = unmarshalLabels(b); err != nil {
-					return err
-				}
-			}
-			return rows.Err()
-		}()
-		if err == nil {
-			ch.timeSeriesRW.Lock()
-			n := len(timeSeries) - len(ch.timeSeries)
-			for f, m := range timeSeries {
-				ch.timeSeries[f] = m
-			}
-			ch.timeSeriesRW.Unlock()
-			ch.l.Debugf("Loaded %d existing time series, %d were unknown to this instance.", len(timeSeries), n)
-		} else {
-			ch.l.Error(err)
-		}
-
-		select {
-		case <-ctx.Done():
-			ch.l.Warn(ctx.Err())
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 func (ch *clickHouse) Describe(c chan<- *prometheus.Desc) {
@@ -260,7 +208,6 @@ func (ch *clickHouse) scanSamples(rows *sql.Rows) ([]*prompb.TimeSeries, error) 
 				Labels: labels,
 			}
 		}
-
 		// add samples to current time series
 		ts.Samples = append(ts.Samples, &prompb.Sample{
 			TimestampMs: timestampMs,
@@ -279,15 +226,15 @@ func (ch *clickHouse) scanSamples(rows *sql.Rows) ([]*prompb.TimeSeries, error) 
 	return res, nil
 }
 
-func (ch *clickHouse) querySamples(ctx context.Context, start, end int64, fingerprints map[uint64]struct{}) ([]*prompb.TimeSeries, error) {
+func (ch *clickHouse) querySamples(ctx context.Context, start, end int64, fingerprints map[uint64]struct{}, hints *prompb.ReadHints) ([]*prompb.TimeSeries, error) {
 	// prepare query string
 	placeholders := strings.Repeat("?, ", len(fingerprints))
+
 	query := fmt.Sprintf(`
-		SELECT fingerprint, timestamp_ms, value
-			FROM %s.samples
-			WHERE fingerprint IN (%s) AND timestamp_ms >= ? AND timestamp_ms <= ?
-			ORDER BY fingerprint, timestamp_ms`,
-		ch.database, placeholders[:len(placeholders)-2], // cut last ", "
+		SELECT fingerprint, timestamp_ms, value FROM (SELECT fingerprint, timestamp_ms, value FROM %s.samples WHERE fingerprint  IN (%s)
+			AND timestamp_ms >= ? AND timestamp_ms <= ? GROUP BY fingerprint, timestamp_ms, value)
+			GROUP BY fingerprint, value, timestamp_ms, intDiv(toUInt32(timestamp_ms), %v) * %v as ts ORDER BY fingerprint, timestamp_ms`,
+		ch.database, placeholders[:len(placeholders)-2], hints.StepMs, hints.StepMs, // cut last ", "
 	)
 	query = strings.TrimSpace(query)
 	args := make([]interface{}, 0, len(fingerprints)+2)
@@ -369,7 +316,8 @@ func (ch *clickHouse) tempTableSamples(ctx context.Context, start, end int64, fi
 	return ch.scanSamples(rows)
 }
 
-func (ch *clickHouse) Read(ctx context.Context, queries []base.Query) (*prompb.ReadResponse, error) {
+func (ch *clickHouse) Read(ctx context.Context, queries []base.Query, hints *prompb.ReadHints) (*prompb.ReadResponse, error) {
+
 	// special case for {{job="rawsql", query="SELECT …"}} (start is ignored)
 	if len(queries) == 1 && len(queries[0].Matchers) == 2 {
 		var query string
@@ -387,35 +335,87 @@ func (ch *clickHouse) Read(ctx context.Context, queries []base.Query) (*prompb.R
 		}
 	}
 
+
+
 	res := &prompb.ReadResponse{
 		Results: make([]*prompb.QueryResult, len(queries)),
 	}
+	global := time.Now()
+
 	for i, q := range queries {
+		label := fmt.Sprintf("%s", q.Matchers)
+		label = strings.TrimSuffix(label, "}")
+		label = strings.TrimPrefix(label, "{")
+		var replacer = strings.NewReplacer(".*", "%")
+		label = replacer.Replace(label)
+		var fingerprintQuery = "SELECT DISTINCT fingerprint, labels from prometheus.time_series WHERE labels "
+		slicedLabels := strings.Split(label, ",")
+
+		// Parse whole prometheus query label and build a SQL query from it.
+		// Avaiable prometheus queries are:
+		// =: Select labels that are exactly equal to the provided string.
+		// !=: Select labels that are not equal to the provided string.
+		// =~: Select labels that regex-match the provided string.
+		// !~: Select labels that do not regex-match the provided string.
+		// TODO:
+		// add full support for prometheus regex queries (!=) and (!~)
+
+		for _, slice := range slicedLabels {
+			if strings.Contains(slice, "=~\"") { // Build SQL query from prometheus regexp request
+				slice = fmt.Sprintf("%%\"%s", slice)
+				slice = strings.Replace(slice, "=~\"", "\":\"%", -1)
+				slice = strings.TrimSuffix(slice, "\"")
+				fingerprintQuery = fmt.Sprintf("%s LIKE '%s%%\"%%' AND labels", fingerprintQuery, slice)
+			} else if strings.Contains(slice, "=\"") { // Build SQL query from prometheus normal request
+				slice = strings.Replace(slice, "=\"", "\":\"", -1)
+				slice = fmt.Sprintf("%s%%", slice)
+				fingerprintQuery = fmt.Sprintf("%s LIKE '%%\"%s' AND labels", fingerprintQuery, slice)
+			}
+		}
+		fingerprintQuery = strings.TrimSuffix(fingerprintQuery, "AND labels")
+		ch.l.Debugf("fingerprintQuery: %s", fingerprintQuery)
+		rows, err := ch.db.Query(fingerprintQuery)
+		defer rows.Close()
+
+		timeSeries := make(map[uint64][]*prompb.Label, len(ch.timeSeries))
+		var f uint64
+		var b []byte
+		for rows.Next() {
+			rows.Scan(&f, &b)
+			timeSeries[f], err = unmarshalLabels(b)
+		}
+
+		for f, m := range timeSeries {
+			ch.timeSeries[f] = m
+		}
+
 		res.Results[i] = new(prompb.QueryResult)
 
 		// find matching time series
 		fingerprints := make(map[uint64]struct{}, 64)
+		inner := time.Now()
 		ch.timeSeriesRW.RLock()
+		ch.l.Debugf("Inner %s read lock acquired %s", i, time.Now().Sub(inner))
 		for f, labels := range ch.timeSeries {
 			if q.Matchers.MatchLabels(labels) {
 				fingerprints[f] = struct{}{}
 			}
 		}
 		ch.timeSeriesRW.RUnlock()
-		if len(fingerprints) == 0 {
-			continue
-		}
+		ch.l.Debugf("Inner %s read lock released %s", i, time.Now().Sub(inner))
 
 		sampleFunc := ch.querySamples
-		if len(fingerprints) > ch.maxTimeSeriesInQuery {
-			sampleFunc = ch.tempTableSamples
-		}
-		ts, err := sampleFunc(ctx, int64(q.Start), int64(q.End), fingerprints)
+
+		ts, err := sampleFunc(ctx, int64(q.Start), int64(q.End), fingerprints, hints)
 		if err != nil {
 			return nil, err
 		}
 		res.Results[i].TimeSeries = ts
+
+		ch.l.Debugf("Inner %s read took %s", i, time.Now().Sub(inner))
 	}
+
+	ch.l.Debugf("Global read took %s", time.Now().Sub(global))
 
 	return res, nil
 }
